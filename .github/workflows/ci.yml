@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 Sebastien Rousseau <sebastian.rousseau@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/v*"]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["go.mod", "stable"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go from go.mod
+        if: matrix.go == 'go.mod'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Set up stable Go
+        if: matrix.go == 'stable'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: Test and example
+        run: |
+          go test -race -shuffle=on -count=1 ./... -cover
+          go run ./examples/quickstart
+
+  coverage:
+    name: Coverage Gate (>= 85%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Every package at or above 85% statement coverage
+        env:
+          THRESHOLD: "85"
+        run: |
+          set -euo pipefail
+          go test -count=1 -coverprofile=coverage.out ./... 2>&1 | tee coverage.log
+          failed=0
+          while read -r line; do
+            pkg="$(echo "${line}" | awk '{print $2}')"
+            pct="$(echo "${line}" | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+' || true)"
+            [ -z "${pct}" ] && continue
+            case "${pkg}" in */examples/*) continue ;; esac
+            if awk -v p="${pct}" -v t="${THRESHOLD}" 'BEGIN { exit !(p < t) }'; then
+              echo "::error::${pkg} is at ${pct}%, below the ${THRESHOLD}% gate"
+              failed=1
+            fi
+          done < <(grep -E '^ok' coverage.log)
+          exit "${failed}"
+
+  lint-and-hygiene:
+    name: Lint, REUSE, Family & Lockstep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Installable without replace directive
+        run: |
+          if grep -q '^replace' go.mod; then
+            echo "::error::go.mod carries a replace directive" >&2
+            exit 1
+          fi
+          test -z "$(gofmt -l .)"
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+          args: ./...
+      - name: REUSE compliance
+        uses: fsfe/reuse-action@266f8748c6f7ab9d6fb2fdd2ac1fd5bbea0fb43e # v6.1.2
+      - name: Family manifest & version lockstep
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          make family
+          make lockstep
